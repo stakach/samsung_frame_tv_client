@@ -1,0 +1,12 @@
+name: samsung_tv
+version: 1.0.0
+
+development_dependencies:
+  # Linter
+  ameba:
+    github: crystal-ameba/ameba
+
+authors:
+  - Stephen von Takach <steve@place.technology>
+
+license: MIT
