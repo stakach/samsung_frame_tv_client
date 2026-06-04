@@ -119,6 +119,133 @@ describe SamsungTV::Client do
     end
   end
 
+  describe "deep-standby wake fallback" do
+    # A dozing TV answers REST but never completes the remote-channel
+    # handshake; waking must fall back to a REST app launch.
+    it "#power_on launches an app over REST when the remote channel is dead" do
+      fake_tv = FakeTV.new(power_state: "standby", accept_remote: false)
+      port = fake_tv.start
+      client = SamsungTV::Client.new(
+        "127.0.0.1", port: port, tls: false, timeout: 300.milliseconds
+      )
+
+      begin
+        client.power_on
+        fake_tv.launched_apps.should eq([SamsungTV::Client::WAKE_APP_ID])
+        fake_tv.sent_keys.should be_empty
+      ensure
+        client.close
+        fake_tv.stop
+      end
+    end
+
+    it "#art_mode wakes via REST then toggles art once the TV reports On" do
+      fake_tv = FakeTV.new(frame_tv: true, power_state: "standby", accept_remote: false)
+      port = fake_tv.start
+      client = SamsungTV::Client.new(
+        "127.0.0.1", port: port, tls: false, timeout: 300.milliseconds
+      )
+
+      begin
+        done = Channel(Exception?).new(1)
+        spawn do
+          client.art_mode(wake_timeout: 2.seconds, settle: 10.milliseconds)
+          done.send(nil)
+        rescue ex
+          done.send(ex)
+        end
+
+        wait_until { fake_tv.launched_apps.size == 1 }
+
+        # The TV wakes: REST reports on and the remote channel works again.
+        fake_tv.power_state = "on"
+        fake_tv.accept_remote = true
+
+        done.receive.should be_nil
+        fake_tv.launched_apps.should eq([SamsungTV::Client::WAKE_APP_ID])
+        wait_until { fake_tv.sent_keys.size == 1 }
+        fake_tv.sent_keys.should eq(["KEY_POWER"]) # the on -> art toggle
+      ensure
+        client.close
+        fake_tv.stop
+      end
+    end
+  end
+
+  describe "#art_mode" do
+    it "wakes the TV, waits for On, then toggles into art mode" do
+      with_fake_tv(frame_tv: true, power_state: "standby") do |client, fake_tv|
+        done = Channel(Exception?).new(1)
+        spawn do
+          client.art_mode(wake_timeout: 2.seconds, settle: 10.milliseconds)
+          done.send(nil)
+        rescue ex
+          done.send(ex)
+        end
+
+        # First press goes out while the TV still reports standby...
+        wait_until { fake_tv.sent_keys.size == 1 }
+        sleep 50.milliseconds
+        fake_tv.sent_keys.size.should eq(1) # ...and the second waits for On
+
+        # TV wakes; the second press should follow.
+        fake_tv.power_state = "on"
+        wait_until { fake_tv.sent_keys.size == 2 }
+
+        done.receive.should be_nil
+        fake_tv.sent_keys.should eq(["KEY_POWER", "KEY_POWER"])
+        fake_tv.sent_cmds.should eq(["Click", "Click"])
+      end
+    end
+
+    it "gives up without the second press if the TV never wakes" do
+      with_fake_tv(frame_tv: true, power_state: "standby") do |client, fake_tv|
+        expect_raises(SamsungTV::TimeoutError) do
+          client.art_mode(wake_timeout: 100.milliseconds)
+        end
+        fake_tv.sent_keys.should eq(["KEY_POWER"]) # wake press only
+      end
+    end
+
+    it "toggles straight into art with a single press when the TV is on" do
+      with_fake_tv(frame_tv: true, power_state: "on") do |client, fake_tv|
+        client.art_mode(wake_timeout: 100.milliseconds)
+        wait_until { fake_tv.sent_keys.size == 1 }
+        fake_tv.sent_keys.should eq(["KEY_POWER"])
+        fake_tv.sent_cmds.should eq(["Click"])
+      end
+    end
+
+    it "does nothing on a non-Frame TV" do
+      with_fake_tv(frame_tv: false, power_state: "standby") do |client, fake_tv|
+        client.art_mode(wake_timeout: 100.milliseconds)
+        sleep 50.milliseconds
+        fake_tv.sent_keys.should be_empty
+      end
+    end
+  end
+
+  describe "#wait_for_power" do
+    it "returns once the TV reaches the target state" do
+      with_fake_tv(power_state: "standby") do |client, fake_tv|
+        spawn do
+          sleep 50.milliseconds
+          fake_tv.power_state = "on"
+        end
+        client.wait_for_power(SamsungTV::PowerState::On, timeout: 2.seconds, poll_interval: 10.milliseconds)
+        client.power_state.should eq(SamsungTV::PowerState::On)
+      end
+    end
+
+    it "raises TimeoutError when the state never changes" do
+      with_fake_tv(power_state: "standby") do |client, _tv|
+        expect_raises(SamsungTV::TimeoutError) do
+          client.wait_for_power(SamsungTV::PowerState::On, timeout: 50.milliseconds, poll_interval: 10.milliseconds)
+        end
+      end
+    end
+  end
+
   describe "volume / mute" do
     it "#volume_up sends KEY_VOLUP per step" do
       with_fake_tv do |client, fake_tv|

@@ -1,5 +1,23 @@
 # Lessons
 
+## Deep standby kills the remote websocket; REST app launch still wakes the TV
+
+After hours in standby the TV still answers REST (and the plaintext 8001
+websocket replies instantly), but the secure 8002 remote channel completes the
+TCP/TLS/upgrade and then **never sends `ms.channel.connect`** — so `KEY_POWER`
+cannot be delivered and `power_on` times out. This was the Matter bridge's
+"power off works, power on doesn't" bug. Wake-on-LAN did **not** wake this
+WiFi-connected TV. What does work, with no auth and from any standby depth:
+`POST /api/v2/applications/org.tizen.browser` (HTTP 200 → panel wakes,
+PowerState flips to "on"). `power_on`/`art_mode` now use `wake_panel`:
+websocket `KEY_POWER` first, REST app launch on ConnectionError/TimeoutError.
+
+**Debugging trap:** `/tmp` is cleaned overnight — the token file vanished, and a
+token-less websocket connect to a screen-off TV also hangs (it cannot show the
+Allow prompt), which initially contaminated the deep-standby diagnosis. Keep
+test tokens somewhere durable and re-verify assumptions when a test that
+"worked yesterday" fails.
+
 ## Verify protocol assumptions against real hardware, not just the reference
 
 When reimplementing the `samsung-tv-ws-api` art protocol, the reference always

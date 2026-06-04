@@ -40,8 +40,9 @@ tv.device_info # => SamsungTV::DeviceInfo (model, mac, ...)
 
 # --- power ---
 tv.power_off   # screen off (standby)
-tv.power_on    # back on (Wake-on-LAN if it has left the network)
+tv.power_on    # back on (REST app-launch / Wake-on-LAN fallbacks, see below)
 tv.power_state = SamsungTV::PowerState::Off
+tv.art_mode    # into art mode (from On: one press; from standby: wake first)
 
 # --- volume / mute ---
 tv.volume_up(3)
@@ -79,10 +80,25 @@ Accept on the TV, then reconnect — the TV hands back a token, which is stored 
   a hold sent as a stream of `Press` frames — a single Press→Release just toggles
   art mode — so `power_off` sends repeated `Press` frames (`power_off_hold`,
   default 4 s) then a `Release`. On a non-Frame TV a single click is used.
-- **Turning on** sends `KEY_POWER` (the TV is reachable in standby). If the TV
-  has dropped off the network entirely, `power_on` falls back to **Wake-on-LAN**,
-  so the MAC must be known — pass `mac:` or let the library learn it from device
-  info while the TV is reachable.
+- **Turning on** sends `KEY_POWER`. In *light* standby the remote websocket still
+  accepts sessions and this works directly. After a longer doze ("deep" standby)
+  the TV keeps answering REST but stops granting secure remote sessions, so the
+  websocket handshake times out — `power_on` then falls back to launching an app
+  over REST (`POST /api/v2/applications/org.tizen.browser`), which needs no auth
+  and reliably wakes the panel (cosmetic cost: the browser shows briefly). If the
+  TV has dropped off the network entirely, `power_on` falls back to
+  **Wake-on-LAN** instead, so the MAC must be known — pass `mac:` or let the
+  library learn it from device info while the TV is reachable. (Note: on this
+  WiFi-connected test TV, WoL alone did *not* wake deep standby — the REST app
+  launch is the dependable wake.)
+- **Art mode** can be *entered* with `art_mode`. From `On` it sends a single
+  `KEY_POWER` (which toggles a Frame showing a source into art). From standby it
+  wakes the panel, polls `wait_for_power` until the TV reports `On` (30 s
+  timeout, raises `TimeoutError`), waits a few seconds for the UI to actually
+  accept keys (`settle`, default 4 s — earlier presses are silently dropped),
+  then sends the toggle. **Assumes the TV is not already in art mode**: art
+  reads as `On` locally, so calling it while art is showing would toggle back
+  out of art.
 
 ### Why art mode isn't a separate state
 

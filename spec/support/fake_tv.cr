@@ -9,12 +9,17 @@ class FakeTV
   property power_state : String? # "on" / "standby" / "" / nil (field absent)
   property? frame_tv : Bool
   property token : String
+  # When false the remote channel never completes its handshake — simulates a
+  # deeply-dozing standby TV that stops granting secure remote sessions.
+  property? accept_remote : Bool
 
   @server : HTTP::Server
 
   def initialize(@frame_tv : Bool = true, @power_state : String? = "on",
-                 @mac : String = "aa:bb:cc:dd:ee:ff", @token : String = "test-token-123")
+                 @mac : String = "aa:bb:cc:dd:ee:ff", @token : String = "test-token-123",
+                 @accept_remote : Bool = true)
     @remote_messages = [] of JSON::Any
+    @launched_apps = [] of String
     @mutex = Mutex.new
     @port = 0
     @server = build_server
@@ -36,6 +41,11 @@ class FakeTV
   # All raw frames received on the remote-control channel.
   def remote_messages : Array(JSON::Any)
     @mutex.synchronize { @remote_messages.dup }
+  end
+
+  # App ids launched via `POST /api/v2/applications/<id>`, in order.
+  def launched_apps : Array(String)
+    @mutex.synchronize { @launched_apps.dup }
   end
 
   # The `DataOfCmd` of every `SendRemoteKey` frame, in order.
@@ -60,9 +70,15 @@ class FakeTV
     end
 
     HTTP::Server.new([ws_handler.as(HTTP::Handler)]) do |context|
-      if context.request.path == "/api/v2/"
+      path = context.request.path
+      if path == "/api/v2/"
         context.response.content_type = "application/json"
         context.response.print(device_info_json)
+      elsif context.request.method == "POST" && path.starts_with?("/api/v2/applications/")
+        app_id = path.lchop("/api/v2/applications/")
+        @mutex.synchronize { @launched_apps << app_id }
+        context.response.content_type = "application/json"
+        context.response.print("true")
       else
         context.response.respond_with_status(:not_found)
       end
@@ -70,6 +86,9 @@ class FakeTV
   end
 
   private def handle_remote(ws : HTTP::WebSocket) : Nil
+    # A dozing TV upgrades the websocket but never sends ms.channel.connect.
+    return unless accept_remote?
+
     ws.on_message do |message|
       @mutex.synchronize { @remote_messages << JSON.parse(message) }
     end

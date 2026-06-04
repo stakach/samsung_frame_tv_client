@@ -29,12 +29,24 @@ module SamsungTV
       false
     end
 
+    # Launch a Tizen application by id (`POST /api/v2/applications/<id>`).
+    # Notably this works — and wakes the panel — even in deep standby, where
+    # the secure remote websocket no longer grants sessions, and it requires
+    # no token. Raises `ConnectionError` if the TV cannot be reached.
+    def launch_app(app_id : String) : Nil
+      request("POST", "/api/v2/applications/#{app_id}")
+    end
+
     private def get(path : String) : String
+      request("GET", path)
+    end
+
+    private def request(method : String, path : String) : String
       client = build_client
       begin
-        response = client.get(path)
+        response = client.exec(method, path)
         unless response.success?
-          raise ConnectionError.new("REST #{path} returned #{response.status_code}")
+          raise ConnectionError.new("REST #{method} #{path} returned #{response.status_code}")
         end
         response.body
       ensure

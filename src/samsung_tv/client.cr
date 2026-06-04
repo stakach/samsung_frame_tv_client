@@ -157,12 +157,17 @@ module SamsungTV
       end
     end
 
-    # Turn the TV on. No-op if already on. Wakes a reachable standby TV with
-    # `KEY_POWER`; falls back to Wake-on-LAN if the TV is off the network.
+    # Launched over REST to wake a deeply-dozing TV (see `#wake_panel`). Any
+    # installed app works; the browser is universally present.
+    WAKE_APP_ID = "org.tizen.browser"
+
+    # Turn the TV on. No-op if already on. Wakes a reachable standby TV via
+    # `KEY_POWER` (falling back to a REST app launch in deep standby); falls
+    # back to Wake-on-LAN if the TV is off the network entirely.
     def power_on : Nil
       if reachable?
         return if device_info(force: true).on?
-        remote.send_key(Key::POWER)
+        wake_panel
       else
         wake
       end
@@ -177,6 +182,44 @@ module SamsungTV
         hold_key(Key::POWER, @power_off_hold)
       else
         remote.send_key(Key::POWER)
+      end
+    end
+
+    # Switch a Frame TV into art mode. From `On` a single `KEY_POWER` toggles
+    # straight into art. From standby the panel is woken first; once the TV
+    # reports `On` and has had *settle* to finish waking (the UI silently drops
+    # remote keys for the first few seconds), the art toggle is sent. No-op on
+    # non-Frame TVs.
+    #
+    # NOTE: assumes the TV is *not already in art mode* — art mode reads as
+    # `On` and cannot be distinguished locally, so calling this while art is
+    # showing would toggle it back out of art.
+    #
+    # Raises `TimeoutError` if a woken TV does not report `On` within
+    # *wake_timeout*; the art toggle is then deliberately not sent, as a late
+    # press would flip a slow-waking TV straight back off.
+    def art_mode(wake_timeout : Time::Span = 30.seconds, settle : Time::Span = 4.seconds) : Nil
+      return unless frame_tv_or_assume?
+
+      if power_state.off?
+        wake_panel
+        wait_for_power(PowerState::On, timeout: wake_timeout)
+        sleep settle
+      end
+      remote.send_key(Key::POWER)
+    end
+
+    # Poll until the TV reports *target* power state, checking every
+    # *poll_interval*. Raises `TimeoutError` if it has not reached the target
+    # within *timeout*.
+    def wait_for_power(target : PowerState, *, timeout : Time::Span = 30.seconds,
+                       poll_interval : Time::Span = 500.milliseconds) : Nil
+      deadline = Time.instant + timeout
+      until power_state == target
+        if Time.instant >= deadline
+          raise TimeoutError.new("TV did not reach #{target} within #{timeout.total_seconds.round(1)}s")
+        end
+        sleep poll_interval
       end
     end
 
@@ -253,6 +296,18 @@ module SamsungTV
     end
 
     # ----- internals -------------------------------------------------------
+
+    # Wake a standby panel. `KEY_POWER` over the websocket works in light
+    # standby, but after a longer doze the TV stops granting secure remote
+    # sessions while the screen is off (it also cannot show the auth prompt),
+    # so the handshake times out. Launching any app over REST still works in
+    # that state — and wakes the TV — at the cosmetic cost of the browser
+    # being on screen briefly.
+    private def wake_panel : Nil
+      remote.send_key(Key::POWER)
+    rescue ConnectionError | TimeoutError
+      @rest.launch_app(WAKE_APP_ID)
+    end
 
     private def frame_tv_or_assume? : Bool
       device_info.frame_tv?
